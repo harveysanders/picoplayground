@@ -6,7 +6,7 @@ TinyGo driver + example for an HD44780 LCD with a PCF8574 I2C backpack
 ## Hardware
 
 - Board: Raspberry Pi Pico 2 W (RP2350)
-- LCD backpack: PCF8574/HD44780 (ex: Z-0234)
+- LCD backpack: [PCF8574](https://www.ti.com/product/PCF8574)/[HD44780](https://cdn.sparkfun.com/assets/9/5/f/7/b/HD44780.pdf) (ex: Z-0234)
 - I2C pins: SDA=GP4, SCL=GP5 (I2C0)
 
 Wiring:
