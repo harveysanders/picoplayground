@@ -1,57 +1,37 @@
-# Raspberry Pi Pico 2 W - TinyGo LED Blink
+# TinyGo Pico Prototypes
 
-Simple LED blink example for Raspberry Pi Pico boards using TinyGo.
+A collection of small TinyGo projects for prototyping on Raspberry Pi Pico, Pico W,
+Pico 2, and Pico 2 W boards.
 
-## Hardware Variants
+## Projects
 
-Understanding which board you have is critical for choosing the right build target:
+- `blinky` - basic LED blink example (see `blinky/README.md`)
+- `pwmblinky` - PWM LED dimming
+- `lcd` - LCD display demo
+- `lcdpot` - LCD + potentiometer
+- `potpick` - potentiometer input demo
 
-| Board        | Chip          | Onboard LED Location | TinyGo Target |
-| ------------ | ------------- | -------------------- | ------------- |
-| **Pico**     | RP2040        | GPIO 25              | `pico`        |
-| **Pico W**   | RP2040 + WiFi | CYW43 WiFi chip      | `pico-w`      |
-| **Pico 2**   | RP2350        | GPIO 25              | `pico2`       |
-| **Pico 2 W** | RP2350 + WiFi | CYW43 WiFi chip      | `pico2-w`     |
+## Targets
 
-**How to identify:**
+Choose the TinyGo target that matches your board:
 
-- **W models** have a metal WiFi antenna shield on the board
-- **Pico 2** boards are marked "Raspberry Pi Pico 2" and have RP2350 chip
-- **Original Pico** boards have RP2040 chip
+| Board        | Chip          | TinyGo Target |
+| ------------ | ------------- | ------------- |
+| **Pico**     | RP2040        | `pico`        |
+| **Pico W**   | RP2040 + WiFi | `pico-w`      |
+| **Pico 2**   | RP2350        | `pico2`       |
+| **Pico 2 W** | RP2350 + WiFi | `pico2-w`     |
 
-## Building and Flashing
+## Build and Flash (Typical)
 
-### Quick Method: Build + Flash in One Command
+1. `cd` into a project directory
+2. Flash the project:
 
-The easiest way is to use `tinygo flash` which builds and flashes automatically:
-
-**For Pico 2 W (RP2350 + WiFi):**
 ```bash
-tinygo flash -target=pico2-w main.go
+tinygo flash -target=<target> main.go
 ```
 
-**For Pico W (RP2040 + WiFi):**
-```bash
-tinygo flash -target=pico-w main.go
-```
-
-**For Pico 2 (RP2350, no WiFi):**
-```bash
-tinygo flash -target=pico2 main.go
-```
-
-**For Pico (RP2040, no WiFi):**
-```bash
-tinygo flash -target=pico main.go
-```
-
-**Before running `tinygo flash`:**
-1. Hold BOOTSEL button on the Pico board
-2. Plug in USB cable while holding BOOTSEL
-3. Release BOOTSEL - the board appears as a USB drive (RPI-RP2)
-4. Run the `tinygo flash` command
-
-The board will automatically reboot and run your program.
+See each project directory for wiring notes and any project-specific details.
 
 ### Alternative: Build Then Flash Manually
 
@@ -63,63 +43,6 @@ tinygo build -target=pico2-w -o main.uf2 main.go
 
 # Then manually copy main.uf2 to the RPI-RP2 USB drive
 ```
-
-## Understanding the LED Differences
-
-### W Models (Pico W, Pico 2 W)
-
-On WiFi-enabled boards, the onboard LED is **not connected to a GPIO pin**. Instead, it's controlled through the CYW43 WiFi chip:
-
-```go
-// This works on W models when using pico-w or pico2-w target
-led := machine.LED  // machine.LED handles CYW43 chip communication
-led.Configure(machine.PinConfig{Mode: machine.PinOutput})
-led.High()  // LED on
-```
-
-### Non-W Models (Pico, Pico 2)
-
-On non-WiFi boards, the LED is directly connected to GPIO 25:
-
-```go
-// This works on non-W models
-led := machine.Pin(25)  // or machine.LED
-led.Configure(machine.PinConfig{Mode: machine.PinOutput})
-led.High()  // LED on
-```
-
-### External LEDs (All Models)
-
-You can use any GPIO pin with an external LED + resistor (220Ω works well):
-
-```go
-led := machine.Pin(15)  // Any available GPIO
-led.Configure(machine.PinConfig{Mode: machine.PinOutput})
-led.High()  // LED on
-```
-
-**Wiring:**
-
-```
-┌─────────────┐
-│   Pico 2 W  │
-│             │
-│  GPIO 15 ●──┼──────┐
-│             │      │
-│             │     ┌▼┐ LED
-│             │     │ │ (long leg)
-│             │     └┬┘
-│             │      │
-│             │     ┌┴┐
-│             │     │R│ 220Ω
-│             │     └┬┘
-│             │      │
-│      GND ●──┼──────┘
-│             │
-└─────────────┘
-```
-
-**Note:** The resistor can also go before the LED - both work since they're in series.
 
 ## VSCode Setup
 
@@ -142,7 +65,7 @@ Create or update `.vscode/settings.json`:
   "go.toolsEnvVars": {
     "GOOS": "linux",
     "GOARCH": "arm",
-    "GOROOT": "/Users/YOUR_USERNAME/Library/Caches/tinygo/goroot-HASH"
+    "GOROOT": "$HOME/Library/Caches/tinygo/goroot-HASH"
   },
   "gopls": {
     "build.buildFlags": [
@@ -151,7 +74,7 @@ Create or update `.vscode/settings.json`:
     "env": {
       "GOOS": "linux",
       "GOARCH": "arm",
-      "GOROOT": "/Users/YOUR_USERNAME/Library/Caches/tinygo/goroot-HASH"
+      "GOROOT": "$HOME/Library/Caches/tinygo/goroot-HASH"
     }
   }
 }
@@ -162,6 +85,9 @@ Create or update `.vscode/settings.json`:
 ```bash
 tinygo info [target, ex: pico2-w]
 ```
+
+Look for the `cached GOROOT:` line in the output and copy that path into
+`GOROOT` in `.vscode/settings.json`.
 
 **Why this is needed:**
 
@@ -204,5 +130,5 @@ tinygo targets | grep pico
 ## Resources
 
 - [TinyGo Documentation](https://tinygo.org/docs/)
-- [Raspberry Pi Pico Pinout](https://datasheets.raspberrypi.com/pico/Pico-R3-A4-Pinout.pdf)
 - [TinyGo Machine Package](https://tinygo.org/docs/reference/microcontrollers/machine/)
+- [Raspberry Pi Pico Pinout](https://datasheets.raspberrypi.com/pico/Pico-R3-A4-Pinout.pdf)
