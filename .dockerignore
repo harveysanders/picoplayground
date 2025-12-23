@@ -1,0 +1,9 @@
+# flyctl launch added from .gitignore
+**/.vscode/settings.json
+**/ssid.text
+**/password.text
+
+
+# flyctl launch added from .jj/.gitignore
+.jj/*
+fly.toml

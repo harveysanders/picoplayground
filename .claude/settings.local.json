@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(tinygo build:*)"
+      "Bash(tinygo build:*)",
+      "Bash(go tool nm:*)",
+      "Bash(gh api:*)",
+      "Bash(go doc:*)"
     ]
   }
 }

@@ -14,8 +14,8 @@ func main() {
 	sensor.Configure(machine.ADCConfig{})
 
 	// https://tinygo.org/docs/reference/microcontrollers/pico2-w/
-	pwm := machine.PWM7
-	err := pwm.Configure(machine.PWMConfig{
+	ledPWM := machine.PWM7
+	err := ledPWM.Configure(machine.PWMConfig{
 		// 500hz
 		Period: uint64(1*time.Second) / 500,
 	})
@@ -24,7 +24,7 @@ func main() {
 		return
 	}
 
-	ch, err := pwm.Channel(led)
+	ch, err := ledPWM.Channel(led)
 	if err != nil {
 		println("could not get channel for pin:", err.Error())
 		return
@@ -32,8 +32,11 @@ func main() {
 
 	for {
 		val := sensor.Get()
-		duty := uint32(val) * pwm.Top() / 65535
-		pwm.Set(ch, duty)
+		// Set the duty cycle based on the value from the sensor (or pot)
+		// The PWM is effectively an analog out that controls the LED brightness.
+		duty := uint32(val) * ledPWM.Top() / 65535
+		ledPWM.Set(ch, duty)
+
 		println(val)
 		time.Sleep(time.Millisecond * 100)
 	}

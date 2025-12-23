@@ -28,10 +28,10 @@ var (
 )
 
 type SensorReading struct {
-	Voltage   float32
-	RawValue  uint16
-	SinceBoot time.Duration
-	Timestamp time.Time // Wall-clock time. Zero if NTP sync failed.
+	Voltage     float32
+	RawUInt16   uint16
+	SinceBootNS time.Duration
+	Timestamp   time.Time // Wall-clock time. Zero if NTP sync failed.
 }
 
 type Client struct {
@@ -43,7 +43,12 @@ type Client struct {
 	TimeSyncedAt      time.Time // When NTP sync occurred. Zero if never synced.
 }
 
-func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lcdMessages chan<- lcd.Message) error {
+func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lcdMessages chan<- lcd.Message, ntpDone chan<- struct{}) error {
+	// Close the ntpDone channel if we return early on an error.
+	defer func() {
+		close(ntpDone)
+	}()
+
 	lcd.Send(lcdMessages, "Connecting to", "WiFi...")
 	dchpClient, stack, _, err := cyw43439.SetupWithDHCP(cyw43439.SetupConfig{
 		Hostname: c.ID,
@@ -81,6 +86,8 @@ func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, l
 		c.Logger.Info("ntp:success", slog.Time("time", c.TimeSyncedAt))
 		time.Sleep(2 * time.Second)
 	}
+	// Signal we're done with NTP, even if it fails
+	close(ntpDone)
 
 	c.Logger.Info("MQTT address: " + addr)
 

@@ -62,7 +62,7 @@ func main() {
 	handler := lcd.NewHandler(lcdDev, lcdMessages, logger)
 	go handler.Run()
 
-	c := mqtt.Client{
+	c := &mqtt.Client{
 		ID:         "tinygo-mqtt",
 		Logger:     logger,
 		Timeout:    5 * time.Second,
@@ -72,8 +72,11 @@ func main() {
 	// Buffered channel of 10 readings. We may need to adjust depending
 	// on the sensor read frequency and network availability
 	sensorReadings := make(chan mqtt.SensorReading, 10)
+	// Need a single to know when NTP sync is complete. We won't record messages until device time
+	// is syncd with NTP (or fails)
+	ntpDone := make(chan struct{})
 	go func() {
-		err := c.ConnectAndPublish(mqttServerAddr, sensorReadings, lcdMessages)
+		err := c.ConnectAndPublish(mqttServerAddr, sensorReadings, lcdMessages, ntpDone)
 		if err != nil {
 			// Print error in a loop in case the serial monitor is not
 			// ready before the inital messages
@@ -120,14 +123,25 @@ func main() {
 		}
 
 		// Non-blocking send to prevent main loop from blocking when channel is full
-		select {
-		case sensorReadings <- mqtt.SensorReading{
+		reading := mqtt.SensorReading{
 			Voltage:   voltage,
 			RawValue:  val,
 			SinceBoot: time.Since(start),
-		}:
+		}
+		// Only set Timestamp if NTP sync succeeded
+		if !c.TimeSyncedAt.IsZero() {
+			reading.Timestamp = time.Now()
+		}
+
+		select {
+		case <-ntpDone:
+			select {
+			case sensorReadings <- reading:
+			default:
+				// Channel full - drop this reading to keep LCD responsive
+			}
 		default:
-			// Channel full - drop this reading to keep LCD responsive
+			// Still waiting on NTP. Don't send any readings to MQTT yet.
 		}
 
 		debugLED.High()
