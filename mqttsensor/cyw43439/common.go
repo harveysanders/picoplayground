@@ -23,8 +23,6 @@ import (
 	"net/netip"
 	"time"
 
-	_ "embed"
-
 	"github.com/soypat/cyw43439"
 	"github.com/soypat/seqs/eth/dhcp"
 	"github.com/soypat/seqs/eth/dns"

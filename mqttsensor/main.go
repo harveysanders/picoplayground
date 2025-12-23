@@ -11,10 +11,17 @@ import (
 	"tinygo.org/x/drivers/hd44780i2c"
 )
 
+// mqttServerAddr is the address to the MQTT broker.
+// It can be passed via linker flags.
+//
+// Ex: "10.0.0.9:1883"
+// make flash/mqtt WIFI_SSID=spacecataz WIFI_PASS=80billion
+// tinygo build -ldflags="-X 'main.mqttServerAddr=10.0.0.9:1883'
+var mqttServerAddr string
+
 const (
-	max16Bit      uint16  = 65535 // Max ADC value. The Pico has an onboard 16-bit ADC.
-	sysV          float32 = 3.3   // Logic level in volts. Pico runs at 3.3VDC.
-	serverAddrStr         = "10.0.0.9:1883"
+	max16Bit uint16  = 65535 // Max ADC value. The Pico has an onboard 16-bit ADC.
+	sysV     float32 = 3.3   // Logic level in volts. Pico runs at 3.3VDC.
 )
 
 func main() {
@@ -34,7 +41,7 @@ func main() {
 	// on the sensor read frequency and network availability
 	sensorReadings := make(chan mqtt.SensorReading, 10)
 	go func() {
-		err := c.ConnectAndPublish(serverAddrStr, sensorReadings)
+		err := c.ConnectAndPublish(mqttServerAddr, sensorReadings)
 		if err != nil {
 			// Print error in a loop in case the serial monitor is not
 			// ready before the inital messages
@@ -90,10 +97,15 @@ func main() {
 
 		lcd.Print(printBuf)
 
-		sensorReadings <- mqtt.SensorReading{
+		// Non-blocking send to prevent main loop from blocking when channel is full
+		select {
+		case sensorReadings <- mqtt.SensorReading{
 			Voltage:   voltage,
 			RawValue:  val,
 			SinceBoot: time.Since(start),
+		}:
+		default:
+			// Channel full - drop this reading to keep LCD responsive
 		}
 
 		debugLED.High()

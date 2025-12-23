@@ -157,12 +157,17 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) er
 					continue
 				}
 			case <-time.After(c.HeartbeatInterval):
+				// If we haven't read any sensor readings from the channel since the last heartbeat interval,
+				// ping the MQTT broken to keep the connnection alive.
 				err = client.HandleNext()
 				if err != nil {
 					c.Logger.Error("mqtt:handle-next-failed", slog.String("err", err.Error()))
 					continue
 				}
 			default:
+				// If we've got nothing to do, release the thread so other go routines can run.
+				// We only need to do this because TinyGo runs on a single core
+				// https://tinygo.org/docs/guides/tips-n-tricks/
 				runtime.Gosched()
 			}
 
