@@ -215,6 +215,11 @@ func (r *Resolver) LookupNetIP(host string) ([]netip.Addr, error) {
 		return nil, err
 	}
 
+	// Abort any pending request so we can reuse the UDP port
+	// ! is it intentional that I need to abort and close the connection/port after use?
+	r.dns.Abort()
+	_ = r.stack.CloseUDP(53)
+
 	err = r.dns.StartResolve(r.dnsConfig(name))
 	if err != nil {
 		return nil, err
@@ -251,6 +256,20 @@ func (r *Resolver) LookupNetIP(host string) ([]netip.Addr, error) {
 		return nil, errors.New("no ipv4 dns answers")
 	}
 	return addrs, nil
+}
+
+// RouterHWAddr returns the hardware address of the router/gateway.
+// This is populated during DNS lookups if the DNS server is not on the local subnet.
+// If not yet populated, it performs ARP resolution.
+func (r *Resolver) RouterHWAddr() ([6]byte, error) {
+	// Check if we already have the hardware address
+	if r.dnshwaddr != [6]byte{} {
+		return r.dnshwaddr, nil
+	}
+
+	// Otherwise, resolve it
+	err := r.updateDNSHWAddr()
+	return r.dnshwaddr, err
 }
 
 func (r *Resolver) updateDNSHWAddr() (err error) {

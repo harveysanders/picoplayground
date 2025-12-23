@@ -3,6 +3,7 @@ package mqtt
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/harveysanders/picoplayground/mqttsensor/cyw43439"
 	"github.com/harveysanders/picoplayground/mqttsensor/lcd"
+	"github.com/harveysanders/picoplayground/mqttsensor/ntp"
 	mqtt "github.com/soypat/natiu-mqtt"
 	"github.com/soypat/seqs"
 	"github.com/soypat/seqs/stacks"
@@ -29,6 +31,7 @@ type SensorReading struct {
 	Voltage   float32
 	RawValue  uint16
 	SinceBoot time.Duration
+	Timestamp time.Time // Wall-clock time. Zero if NTP sync failed.
 }
 
 type Client struct {
@@ -37,51 +40,67 @@ type Client struct {
 	TCPBufSize        int
 	Logger            *slog.Logger
 	HeartbeatInterval time.Duration
+	TimeSyncedAt      time.Time // When NTP sync occurred. Zero if never synced.
 }
 
-func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lcdMessages chan<- lcd.Message) error {
+func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lcdMessages chan<- lcd.Message) error {
 	lcd.Send(lcdMessages, "Connecting to", "WiFi...")
 	dchpClient, stack, _, err := cyw43439.SetupWithDHCP(cyw43439.SetupConfig{
 		Hostname: c.ID,
 		Logger:   c.Logger,
-		TCPPorts: 1, // For HTTP over TCP.
-		UDPPorts: 1, // For DNS.
+		TCPPorts: 1, // For MQTT over TCP.
+		UDPPorts: 2, // For DNS (MQTT + NTP) and NTP client.
 	})
-
-	start := time.Now()
 	if err != nil {
 		return errors.New("setup DHCP:" + err.Error())
+	}
+
+	dnsResolver, err := cyw43439.NewResolver(stack, dchpClient)
+	if err != nil {
+		return errors.New("dns resolver:" + err.Error())
+	}
+
+	// Get router's hardware address from resolver (it's already been resolved during DNS lookup).
+	// We need the router's MAC address to send packets through the gateway to the internet.
+	serverHWAddr, err := dnsResolver.RouterHWAddr()
+	if err != nil {
+		return errors.New("router hwaddr:" + err.Error())
+	}
+	c.Logger.Info(fmt.Sprintf("router hwaddr: %x", (serverHWAddr[0:6])))
+
+	// Sync system time via NTP
+	lcd.Send(lcdMessages, "Syncing time", "via NTP...")
+	err = ntp.SyncTime(stack, dnsResolver, serverHWAddr, c.Logger)
+	if err != nil {
+		c.Logger.Error("ntp sync failed", slog.String("reason", err.Error()))
+		lcd.Send(lcdMessages, "NTP sync failed", "Continuing...")
+		time.Sleep(2 * time.Second)
+	} else {
+		c.TimeSyncedAt = time.Now()
+		lcd.Send(lcdMessages, "Time synced", c.TimeSyncedAt.Format("15:04:05"))
+		c.Logger.Info("ntp:success", slog.Time("time", c.TimeSyncedAt))
+		time.Sleep(2 * time.Second)
 	}
 
 	c.Logger.Info("MQTT address: " + addr)
 
 	// Parse hostname and port from addr (e.g., "hostname:8883")
-	host, portStr, err := splitHostPort(addr)
+	mqttHost, portStr, err := splitHostPort(addr)
 	if err != nil {
 		return errors.New("parsing host:port from " + addr + ": " + err.Error())
 	}
 
-	resolver, err := cyw43439.NewResolver(stack, dchpClient)
+	addrs, err := dnsResolver.LookupNetIP(mqttHost)
 	if err != nil {
-		return errors.New("dns resolver:" + err.Error())
+		return errors.New("dns lookup for " + mqttHost + ": " + err.Error())
 	}
 
-	addrs, err := resolver.LookupNetIP(host)
-	if err != nil {
-		return errors.New("dns lookup for " + host + ": " + err.Error())
-	}
-
+	// Set up MQTT client and broker connection
 	mqttAddr := addrs[0]
 	c.Logger.Info("resolved IP: " + mqttAddr.String())
 	port := parsePort(portStr)
-	// Resolve router's hardware address (via ARP) to dial outside our network to the internet.
-	// We need the router's MAC address, not the destination server's, since the server is on the internet.
-	routerAddr := dchpClient.Router()
-	c.Logger.Info("router IP: " + routerAddr.String())
-	serverHWAddr, err := cyw43439.ResolveHardwareAddr(stack, routerAddr)
-	if err != nil {
-		return errors.New("router hwaddr resolving:" + err.Error())
-	}
+
+	start := time.Now()
 	rng := rand.New(rand.NewSource(int64(time.Now().Sub(start))))
 	// Start TCP server.
 	clientAddr := netip.AddrPortFrom(stack.Addr(), uint16(rng.Intn(65535-1024)+1024))
@@ -89,7 +108,6 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lc
 		TxBufSize: uint16(c.TCPBufSize),
 		RxBufSize: uint16(c.TCPBufSize),
 	})
-
 	if err != nil {
 		panic("conn create:" + err.Error())
 	}
