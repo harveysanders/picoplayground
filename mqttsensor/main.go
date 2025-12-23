@@ -2,30 +2,60 @@ package main
 
 import (
 	"errors"
+	"log/slog"
 	"machine"
 	"strconv"
 	"time"
 
+	"github.com/harveysanders/picoplayground/mqttsensor/mqtt"
 	"tinygo.org/x/drivers/hd44780i2c"
 )
 
+const (
+	max16Bit      uint16  = 65535 // Max ADC value. The Pico has an onboard 16-bit ADC.
+	sysV          float32 = 3.3   // Logic level in volts. Pico runs at 3.3VDC.
+	serverAddrStr         = "10.0.0.9:1883"
+)
+
 func main() {
+	start := time.Now()
+	logger := slog.New(slog.NewTextHandler(machine.Serial, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+
+	c := mqtt.Client{
+		ID:         "tinygo-mqtt",
+		Logger:     logger,
+		Timeout:    5 * time.Second,
+		TCPBufSize: 2030, // MTU - ethhdr - iphdr - tcphdr
+	}
+
+	// Buffered channel of 10 readings. We may need to adjust depending
+	// on the sensor read frequency and network availability
+	sensorReadings := make(chan mqtt.SensorReading, 10)
+	go func() {
+		err := c.ConnectAndPublish(serverAddrStr, sensorReadings)
+		if err != nil {
+			// Print error in a loop in case the serial monitor is not
+			// ready before the inital messages
+			printErrForever(logger, "could not configure I2C", slog.Any("reason", err))
+		}
+	}()
+
 	debugLED := machine.GP21
 	debugLED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 
+	machine.InitADC()
 	sensor := machine.ADC{Pin: machine.ADC0}
 	sensor.Configure(machine.ADCConfig{})
 
 	// Setup LCD display over I2C
-	machine.InitADC()
 	err := machine.I2C0.Configure(machine.I2CConfig{
 		SDA: machine.GP4,
 		SCL: machine.GP5,
 	})
 	if err != nil {
-		// Print error in a loop in case the serial monitor is not
-		// ready before the inital messages
-		printForever("could not configure I2C", err)
+		printErrForever(logger, "could not configure I2C", slog.Any("reason", err))
 	}
 
 	lcd, err := configureLCD(machine.I2C0)
@@ -35,9 +65,6 @@ func main() {
 			time.Sleep(time.Second)
 		}
 	}
-
-	var max16Bit uint16 = 65535
-	var sysV float32 = 3.3
 
 	lcd.ClearDisplay()
 	// Buffer for LCD characters (16x2)
@@ -62,6 +89,12 @@ func main() {
 		printBuf = strconv.AppendUint(printBuf, uint64(val), 10)
 
 		lcd.Print(printBuf)
+
+		sensorReadings <- mqtt.SensorReading{
+			Voltage:   voltage,
+			RawValue:  val,
+			SinceBoot: time.Since(start),
+		}
 
 		debugLED.High()
 		time.Sleep(250 * time.Millisecond)
@@ -100,9 +133,9 @@ func configureLCD(i2c *machine.I2C) (hd44780i2c.Device, error) {
 
 // printError prints a string to serial @ 1hz. It
 // blocks forever.
-func printForever(msg ...any) {
+func printErrForever(logger *slog.Logger, msg string, args ...any) {
 	for {
-		println(msg)
+		logger.Error(msg, args...)
 		time.Sleep(time.Second)
 	}
 }
