@@ -1,14 +1,17 @@
 package main
 
 import (
-	"fmt"
 	"machine"
+	"strconv"
 	"time"
 
 	"tinygo.org/x/drivers/hd44780i2c"
 )
 
 func main() {
+	debugLED := machine.GP21
+	debugLED.Configure(machine.PinConfig{Mode: machine.PinOutput})
+
 	machine.InitADC()
 	sensor := machine.ADC{Pin: machine.ADC0}
 	sensor.Configure(machine.ADCConfig{})
@@ -53,16 +56,34 @@ func main() {
 
 	var max16Bit uint16 = 65535
 	var sysV float32 = 3.3
+
+	lcd.ClearDisplay()
+	// Buffer for LCD characters (16x2)
+	// We need a preallocated buffer so the heap isn't exhausted
+	// by many calls to fmt functions.
+	printBuf := make([]byte, 0, 40)
+	const floatNoExp = 'f'
 	for {
+
+		lcd.SetCursor(0, 0)
+
 		val := sensor.Get()
 		percentage := (float32(val) / float32(max16Bit))
 		voltage := percentage * sysV
-		msg := fmt.Sprintf("V: %.1f, %.1f%%\n16-bit: %d", voltage, percentage*100, val)
+		// reslice the buffer to zero-length so append continues to work
+		printBuf = printBuf[:0]
+		printBuf = append(printBuf, "V: "...)
+		printBuf = strconv.AppendFloat(printBuf, float64(voltage), floatNoExp, 1, 32)
+		printBuf = append(printBuf, ", "...)
+		printBuf = strconv.AppendFloat(printBuf, float64(percentage*100), floatNoExp, 1, 32)
+		printBuf = append(printBuf, "%\n16-bit: "...)
+		printBuf = strconv.AppendUint(printBuf, uint64(val), 10)
 
-		lcd.ClearDisplay()
-		lcd.SetCursor(0, 0)
-		lcd.Print([]byte(msg))
+		lcd.Print(printBuf)
 
-		time.Sleep(500 * time.Millisecond)
+		debugLED.High()
+		time.Sleep(250 * time.Millisecond)
+		debugLED.Low()
+		time.Sleep(250 * time.Millisecond)
 	}
 }

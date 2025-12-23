@@ -38,6 +38,12 @@ tinygo flash -target=pico2-w lcdpot/main.go
 - Prints voltage, percentage, and the 16-bit ADC value.
 - Updates every 500 ms.
 
+## Pico 2 W Hang Note (WIP)
+
+On a Pico 2 W (RP2350), this program can hang after a few minutes. The same
+code runs fine on a Pico W (RP2040). Root cause is unknown; leaving this note
+here to revisit later.
+
 ## Contrast Pot
 
 If the screen is blank (even with backlight on), adjust the contrast pot on the
