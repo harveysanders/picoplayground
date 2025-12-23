@@ -31,25 +31,6 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
-	c := mqtt.Client{
-		ID:         "tinygo-mqtt",
-		Logger:     logger,
-		Timeout:    5 * time.Second,
-		TCPBufSize: 2030, // MTU - ethhdr - iphdr - tcphdr
-	}
-
-	// Buffered channel of 10 readings. We may need to adjust depending
-	// on the sensor read frequency and network availability
-	sensorReadings := make(chan mqtt.SensorReading, 10)
-	go func() {
-		err := c.ConnectAndPublish(mqttServerAddr, sensorReadings)
-		if err != nil {
-			// Print error in a loop in case the serial monitor is not
-			// ready before the inital messages
-			printErrForever(logger, "connect to MQTT broker", slog.Any("reason", err))
-		}
-	}()
-
 	debugLED := machine.GP21
 	debugLED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 
@@ -80,6 +61,30 @@ func main() {
 	lcdMessages := make(chan lcd.Message, 10)
 	handler := lcd.NewHandler(lcdDev, lcdMessages, logger)
 	go handler.Run()
+
+	c := mqtt.Client{
+		ID:         "tinygo-mqtt",
+		Logger:     logger,
+		Timeout:    5 * time.Second,
+		TCPBufSize: 2030, // MTU - ethhdr - iphdr - tcphdr
+	}
+
+	// Buffered channel of 10 readings. We may need to adjust depending
+	// on the sensor read frequency and network availability
+	sensorReadings := make(chan mqtt.SensorReading, 10)
+	go func() {
+		err := c.ConnectAndPublish(mqttServerAddr, sensorReadings, lcdMessages)
+		if err != nil {
+			// Print error in a loop in case the serial monitor is not
+			// ready before the inital messages
+			printErrForever(logger, "connect to MQTT broker", slog.Any("reason", err))
+		}
+	}()
+
+	time.Sleep(10 * time.Second)
+
+	// Read sensor, display readings on LCD and send off to MQTT broker
+	// _________________________________________________________________
 
 	// Buffer for LCD characters (16x2)
 	// We need a preallocated buffer so the heap isn't exhausted
@@ -165,6 +170,6 @@ func configureLCD(i2c *machine.I2C) (hd44780i2c.Device, error) {
 func printErrForever(logger *slog.Logger, msg string, args ...any) {
 	for {
 		logger.Error(msg, args...)
-		time.Sleep(time.Second)
+		time.Sleep(time.Second * 10)
 	}
 }

@@ -76,3 +76,16 @@ func (h *Handler) display(msg Message) {
 		h.device.Print(msg.Line2)
 	}
 }
+
+// Send sends a message to the LCD channel non-blocking.
+// If the channel is full, the message is dropped.
+func Send(ch chan<- Message, line1, line2 string) {
+	select {
+	case ch <- Message{
+		Line1: []byte(line1),
+		Line2: []byte(line2),
+	}:
+	default:
+		// Channel full - drop message
+	}
+}

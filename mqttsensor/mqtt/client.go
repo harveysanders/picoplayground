@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/harveysanders/picoplayground/mqttsensor/cyw43439"
+	"github.com/harveysanders/picoplayground/mqttsensor/lcd"
 	mqtt "github.com/soypat/natiu-mqtt"
 	"github.com/soypat/seqs"
 	"github.com/soypat/seqs/stacks"
@@ -38,8 +39,9 @@ type Client struct {
 	HeartbeatInterval time.Duration
 }
 
-func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) error {
-	_, stack, _, err := cyw43439.SetupWithDHCP(cyw43439.SetupConfig{
+func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lcdMessages chan<- lcd.Message) error {
+	lcd.Send(lcdMessages, "Connecting to", "WiFi...")
+	dchpClient, stack, _, err := cyw43439.SetupWithDHCP(cyw43439.SetupConfig{
 		Hostname: c.ID,
 		Logger:   c.Logger,
 		TCPPorts: 1, // For HTTP over TCP.
@@ -50,12 +52,33 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) er
 	if err != nil {
 		return errors.New("setup DHCP:" + err.Error())
 	}
-	svAddr, err := netip.ParseAddrPort(addr)
+
+	c.Logger.Info("MQTT address: " + addr)
+
+	// Parse hostname and port from addr (e.g., "hostname:8883")
+	host, portStr, err := splitHostPort(addr)
 	if err != nil {
-		return errors.New("parsing server address:" + err.Error())
+		return errors.New("parsing host:port from " + addr + ": " + err.Error())
 	}
-	// Resolver router's hardware address to dial outside our network to internet.
-	serverHWAddr, err := cyw43439.ResolveHardwareAddr(stack, svAddr.Addr())
+
+	resolver, err := cyw43439.NewResolver(stack, dchpClient)
+	if err != nil {
+		return errors.New("dns resolver:" + err.Error())
+	}
+
+	addrs, err := resolver.LookupNetIP(host)
+	if err != nil {
+		return errors.New("dns lookup for " + host + ": " + err.Error())
+	}
+
+	mqttAddr := addrs[0]
+	c.Logger.Info("resolved IP: " + mqttAddr.String())
+	port := parsePort(portStr)
+	// Resolve router's hardware address (via ARP) to dial outside our network to the internet.
+	// We need the router's MAC address, not the destination server's, since the server is on the internet.
+	routerAddr := dchpClient.Router()
+	c.Logger.Info("router IP: " + routerAddr.String())
+	serverHWAddr, err := cyw43439.ResolveHardwareAddr(stack, routerAddr)
 	if err != nil {
 		return errors.New("router hwaddr resolving:" + err.Error())
 	}
@@ -89,16 +112,18 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) er
 	}
 	var varconn mqtt.VariablesConnect
 	varconn.SetDefaultMQTT([]byte(c.ID))
-	client := mqtt.NewClient(cfg)
+	mqttClient := mqtt.NewClient(cfg)
 
 	// Connection loop for TCP+MQTT.
 	for {
 		random := rng.Uint32()
 		c.Logger.Info("socket:listen")
-		err = conn.OpenDialTCP(clientAddr.Port(), serverHWAddr, svAddr, seqs.Value(random))
+		lcd.Send(lcdMessages, "addr", addr)
+		err = conn.OpenDialTCP(clientAddr.Port(), serverHWAddr, netip.AddrPortFrom(mqttAddr, port), seqs.Value(random))
 		if err != nil {
 			panic("socket dial:" + err.Error())
 		}
+		lcd.Send(lcdMessages, "Connecting...", "TCP handshake")
 		retries := 50
 		c.Logger.Info(conn.State().String())
 		for conn.State() != seqs.StateEstablished && retries > 0 {
@@ -113,29 +138,34 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) er
 
 		// We start MQTT connect with a deadline on the socket.
 		c.Logger.Info("mqtt:start-connecting")
+		lcd.Send(lcdMessages, "MQTT Connect", "Authenticating")
 		conn.SetDeadline(time.Now().Add(c.Timeout))
-		err = client.StartConnect(conn, &varconn)
+		err = mqttClient.StartConnect(conn, &varconn)
 		if err != nil {
 			c.Logger.Error("mqtt:start-connect-failed", slog.String("reason", err.Error()))
+			lcd.Send(lcdMessages, "Connect Failed", err.Error()[:min(len(err.Error()), 16)])
 			closeConn("connect failed")
 			continue
 		}
 		retries = 50
-		for retries > 0 && !client.IsConnected() {
+		for retries > 0 && !mqttClient.IsConnected() {
 			time.Sleep(100 * time.Millisecond)
-			err = client.HandleNext()
+			err = mqttClient.HandleNext()
 			if err != nil {
 				c.Logger.Error("mqtt:handle-next-failed", slog.String("err", err.Error()))
 			}
 			retries--
 		}
-		if !client.IsConnected() {
-			c.Logger.Error("mqtt:connect-failed", slog.Any("reason", client.Err()))
+		if !mqttClient.IsConnected() {
+			c.Logger.Error("mqtt:connect-failed", slog.Any("reason", mqttClient.Err()))
+			lcd.Send(lcdMessages, "Connect Failed", "Timed out")
 			closeConn("connect timed out")
 			continue
 		}
 
-		for client.IsConnected() {
+		lcd.Send(lcdMessages, "MQTT Connected", "Publishing...")
+
+		for mqttClient.IsConnected() {
 			select {
 			case reading := <-readings:
 				payload, err := json.Marshal(reading)
@@ -145,13 +175,13 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) er
 				}
 				conn.SetDeadline(time.Now().Add(c.Timeout))
 				pubVar.PacketIdentifier = uint16(rng.Uint32())
-				err = client.PublishPayload(pubFlags, pubVar, payload)
+				err = mqttClient.PublishPayload(pubFlags, pubVar, payload)
 				if err != nil {
 					c.Logger.Error("mqtt:publish-failed", slog.Any("reason", err))
 					continue
 				}
 				c.Logger.Info("published message", slog.Uint64("packetID", uint64(pubVar.PacketIdentifier)))
-				err = client.HandleNext()
+				err = mqttClient.HandleNext()
 				if err != nil {
 					c.Logger.Error("mqtt:handle-next-failed", slog.String("err", err.Error()))
 					continue
@@ -159,7 +189,7 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) er
 			case <-time.After(c.HeartbeatInterval):
 				// If we haven't read any sensor readings from the channel since the last heartbeat interval,
 				// ping the MQTT broken to keep the connnection alive.
-				err = client.HandleNext()
+				err = mqttClient.HandleNext()
 				if err != nil {
 					c.Logger.Error("mqtt:handle-next-failed", slog.String("err", err.Error()))
 					continue
@@ -173,8 +203,51 @@ func (c Client) ConnectAndPublish(addr string, readings <-chan SensorReading) er
 
 		}
 
-		c.Logger.Error("mqtt:disconnected", slog.Any("reason", client.Err()))
+		c.Logger.Error("mqtt:disconnected", slog.Any("reason", mqttClient.Err()))
+		lcd.Send(lcdMessages, "Disconnected", "Reconnecting...")
 		closeConn("disconnected")
 		runtime.Gosched()
 	}
+}
+
+// splitHostPort splits a host:port string into separate host and port components.
+// Returns an error if the format is invalid.
+func splitHostPort(addr string) (host, port string, err error) {
+	// Find the last colon to support IPv6 addresses
+	colonIdx := -1
+	for i := len(addr) - 1; i >= 0; i-- {
+		if addr[i] == ':' {
+			colonIdx = i
+			break
+		}
+	}
+
+	if colonIdx == -1 {
+		return "", "", errors.New("missing port in address")
+	}
+
+	host = addr[:colonIdx]
+	port = addr[colonIdx+1:]
+
+	if host == "" {
+		return "", "", errors.New("empty host")
+	}
+	if port == "" {
+		return "", "", errors.New("empty port")
+	}
+
+	return host, port, nil
+}
+
+// parsePort converts a port string to uint16.
+// Returns 0 if parsing fails (caller should validate).
+func parsePort(portStr string) uint16 {
+	var port uint16
+	for i := 0; i < len(portStr); i++ {
+		if portStr[i] < '0' || portStr[i] > '9' {
+			return 0
+		}
+		port = port*10 + uint16(portStr[i]-'0')
+	}
+	return port
 }
