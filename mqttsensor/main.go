@@ -38,7 +38,7 @@ func main() {
 		if err != nil {
 			// Print error in a loop in case the serial monitor is not
 			// ready before the inital messages
-			printErrForever(logger, "could not configure I2C", slog.Any("reason", err))
+			printErrForever(logger, "connect to MQTT broker", slog.Any("reason", err))
 		}
 	}()
 
@@ -55,7 +55,7 @@ func main() {
 		SCL: machine.GP5,
 	})
 	if err != nil {
-		printErrForever(logger, "could not configure I2C", slog.Any("reason", err))
+		printErrForever(logger, "configure I2C", slog.Any("reason", err))
 	}
 
 	lcd, err := configureLCD(machine.I2C0)

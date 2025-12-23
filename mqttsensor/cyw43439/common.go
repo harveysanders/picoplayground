@@ -46,11 +46,7 @@ type SetupConfig struct {
 }
 
 var (
-	// Put the SSID and password text in ssid.text and password.text.
-	//
-	//go:embed ssid.text
 	ssid string
-	//go:embed password.text
 	pass string
 )
 
@@ -62,6 +58,7 @@ func SetupWithDHCP(cfg SetupConfig) (*stacks.DHCPClient, *stacks.PortStack, *cyw
 			Level: slog.Level(127), // Make temporary logger that does no logging.
 		}))
 	}
+
 	var err error
 	var reqAddr netip.Addr
 	if cfg.RequestedIP != "" {
