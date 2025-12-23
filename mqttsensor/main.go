@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/harveysanders/picoplayground/mqttsensor/lcd"
 	"github.com/harveysanders/picoplayground/mqttsensor/mqtt"
 	"tinygo.org/x/drivers/hd44780i2c"
 )
@@ -65,7 +66,7 @@ func main() {
 		printErrForever(logger, "configure I2C", slog.Any("reason", err))
 	}
 
-	lcd, err := configureLCD(machine.I2C0)
+	lcdDev, err := configureLCD(machine.I2C0)
 	if err != nil {
 		for {
 			println(err.Error())
@@ -73,29 +74,45 @@ func main() {
 		}
 	}
 
-	lcd.ClearDisplay()
+	lcdDev.ClearDisplay()
+
+	// Create channel and start LCD handler goroutine
+	lcdMessages := make(chan lcd.Message, 10)
+	handler := lcd.NewHandler(lcdDev, lcdMessages, logger)
+	go handler.Run()
+
 	// Buffer for LCD characters (16x2)
 	// We need a preallocated buffer so the heap isn't exhausted
 	// by many calls to fmt functions.
-	printBuf := make([]byte, 0, 40)
+	line1 := make([]byte, 0, 20)
+	line2 := make([]byte, 0, 20)
 	const floatNoExp = 'f'
 	for {
-
-		lcd.SetCursor(0, 0)
+		// reslice the buffers to zero-length so append continues to work
+		line1 = line1[:0]
+		line2 = line2[:0]
 
 		val := sensor.Get()
 		percentage := (float32(val) / float32(max16Bit))
 		voltage := percentage * sysV
-		// reslice the buffer to zero-length so append continues to work
-		printBuf = printBuf[:0]
-		printBuf = append(printBuf, "V: "...)
-		printBuf = strconv.AppendFloat(printBuf, float64(voltage), floatNoExp, 1, 32)
-		printBuf = append(printBuf, ", "...)
-		printBuf = strconv.AppendFloat(printBuf, float64(percentage*100), floatNoExp, 1, 32)
-		printBuf = append(printBuf, "%\n16-bit: "...)
-		printBuf = strconv.AppendUint(printBuf, uint64(val), 10)
 
-		lcd.Print(printBuf)
+		// Ex line1: "V: 3.2, 97.0%"
+		line1 = append(line1, "V: "...)
+		line1 = strconv.AppendFloat(line1, float64(voltage), floatNoExp, 1, 32)
+		line1 = append(line1, ", "...)
+		line1 = strconv.AppendFloat(line1, float64(percentage*100), floatNoExp, 1, 32)
+		line1 = append(line1, "%"...)
+
+		// Ex line2: "16-bit: 63452"
+		line2 = append(line2, "16-bit: "...)
+		line2 = strconv.AppendUint(line2, uint64(val), 10)
+
+		// Non-blocking send to LCD
+		select {
+		case lcdMessages <- lcd.Message{Line1: line1, Line2: line2}:
+		default:
+			// Channel full - drop message to keep sensor loop responsive
+		}
 
 		// Non-blocking send to prevent main loop from blocking when channel is full
 		select {
