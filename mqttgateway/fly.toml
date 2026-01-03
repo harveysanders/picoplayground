@@ -13,3 +13,14 @@ primary_region = 'dfw'
   memory = '1gb'
   cpus = 1
   memory_mb = 1024
+
+[[mounts]]
+  source = "mosquitto_data"
+  destination = "/mosquitto/data"
+
+[[services]]
+  internal_port = 1883
+  protocol = "tcp"
+
+[[services.ports]]
+  port = "10000"

@@ -2,7 +2,7 @@
 **/.vscode/settings.json
 **/ssid.text
 **/password.text
-
+passwd
 
 # flyctl launch added from .jj/.gitignore
 .jj/*
