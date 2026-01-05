@@ -18,3 +18,9 @@
 - [ ] Create a display 'layers' so that a user can toggle between different sets of information on the LCD
   - [ ] For example: MQTT connection state, IP address, sensor readings, etc.
   - [ ] Display startup and error messages as the program loads (after LCD is initialized)
+- [ ] HTTP server for configuration and status monitoring ?
+  - [ ] Web interface to configure WiFi, MQTT, and sensor settings
+  - [ ] Display current sensor readings and connection status
+- [ ] Persist to SD card ?
+  - [ ] Log sensor data with timestamps
+  - [ ] Store configuration settings

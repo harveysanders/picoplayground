@@ -119,7 +119,7 @@ func main() {
 	handler := lcd.NewHandler(lcdDev, lcdMessages, logger)
 	go handler.Run()
 
-	c := &mqtt.Client{
+	mqttC := &mqtt.Client{
 		ID:                "tinygo-mqtt",
 		Logger:            logger,
 		Timeout:           5 * time.Second,
@@ -144,7 +144,7 @@ func main() {
 		cyw43439.Password(),
 		cyw43439.DefaultWifiConfig(),
 		cyw43439.StackConfig{
-			Hostname:    c.ID,
+			Hostname:    mqttC.ID,
 			MaxTCPPorts: 1,
 			Logger:      logger,
 		},
@@ -160,7 +160,7 @@ func main() {
 	lcd.Send(lcdMessages, "Getting IP", "via DHCP...")
 	dhcpResults, err := cystack.SetupWithDHCP(cyw43439.DHCPConfig{
 		RequestedAddr: netip.AddrFrom4([4]byte{192, 168, 1, 99}),
-		Hostname:      c.ID,
+		Hostname:      mqttC.ID,
 	})
 	if err != nil {
 		printErrForever(logger, "DHCP setup", slog.Any("reason", err))
@@ -175,15 +175,15 @@ func main() {
 		lcd.Send(lcdMessages, "NTP sync failed", "Continuing...")
 		time.Sleep(2 * time.Second)
 	} else {
-		c.TimeSyncedAt = time.Now()
-		lcd.Send(lcdMessages, "Time synced", c.TimeSyncedAt.Format("15:04:05"))
-		logger.Info("ntp:success", slog.Time("time", c.TimeSyncedAt))
+		mqttC.TimeSyncedAt = time.Now()
+		lcd.Send(lcdMessages, "Time synced", mqttC.TimeSyncedAt.Format("15:04:05"))
+		logger.Info("ntp:success", slog.Time("time", mqttC.TimeSyncedAt))
 		time.Sleep(2 * time.Second)
 	}
 
 	// 5. Start MQTT in goroutine (pass stack)
 	go func() {
-		err := c.ConnectAndPublish(cystack, mqttServerAddr, sensorReadings, lcdMessages)
+		err := mqttC.ConnectAndPublish(cystack, mqttServerAddr, sensorReadings, lcdMessages)
 		if err != nil {
 			// Print error in a loop in case the serial monitor is not
 			// ready before the initial messages
@@ -269,7 +269,7 @@ func main() {
 			SinceBootNS: time.Since(start),
 		}
 		// Only set Timestamp if NTP sync succeeded
-		if !c.TimeSyncedAt.IsZero() {
+		if !mqttC.TimeSyncedAt.IsZero() {
 			reading.Timestamp = time.Now()
 		}
 
