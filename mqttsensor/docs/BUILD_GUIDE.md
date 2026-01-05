@@ -136,11 +136,15 @@ Note: Some DHT11 modules have a built-in pull-up resistor. Check your module bef
 ```
 LCD I2C Backpack    Pico
 ─────────────────────────
-VCC              ── VSYS or 5V (if available)
+VCC              ── 3V3(OUT)
 GND              ── GND
 SDA              ── GP4
 SCL              ── GP5
 ```
+
+**Important:** Power the I2C backpack at 3.3V, not 5V. The backpack's I2C lines have pull-ups to VCC, so powering at 5V would put 5V on the Pico's GPIO pins, which are not 5V tolerant and could be damaged.
+
+The PCF8574 chip works fine at 3.3V. LCD contrast may be slightly reduced compared to 5V operation, but is typically still readable. If you need 5V for better contrast, use a bidirectional I2C level shifter between the Pico and the backpack.
 
 The LCD backpack typically has address `0x27` or `0x3F`. The firmware auto-detects both.
 
