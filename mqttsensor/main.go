@@ -16,9 +16,19 @@ import (
 // It can be passed via linker flags.
 //
 // Ex: "10.0.0.9:1883"
-// make flash/mqtt WIFI_SSID=spacecataz WIFI_PASS=80billion
+// make flash/mqtt WIFI_SSID=spacecataz WIFI_PASS=foreigner
 // tinygo build -ldflags="-X 'main.mqttServerAddr=10.0.0.9:1883'
 var mqttServerAddr string
+
+// mqttUsername is the MQTT broker username for authentication.
+// Optional - if empty, anonymous connection is attempted.
+// Can be passed via linker flags.
+var mqttUsername string
+
+// mqttPassword is the MQTT broker password for authentication.
+// Optional - only used if mqttUsername is also set.
+// Can be passed via linker flags.
+var mqttPassword string
 
 const (
 	max16Bit uint16  = 65535 // Max ADC value. The Pico has an onboard 16-bit ADC.
@@ -67,6 +77,8 @@ func main() {
 		Logger:     logger,
 		Timeout:    5 * time.Second,
 		TCPBufSize: 2030, // MTU - ethhdr - iphdr - tcphdr
+		Username:   mqttUsername,
+		Password:   mqttPassword,
 	}
 
 	// Buffered channel of 10 readings. We may need to adjust depending
@@ -124,9 +136,9 @@ func main() {
 
 		// Non-blocking send to prevent main loop from blocking when channel is full
 		reading := mqtt.SensorReading{
-			Voltage:   voltage,
-			RawValue:  val,
-			SinceBoot: time.Since(start),
+			Voltage:     voltage,
+			RawUInt16:   val,
+			SinceBootNS: time.Since(start),
 		}
 		// Only set Timestamp if NTP sync succeeded
 		if !c.TimeSyncedAt.IsZero() {

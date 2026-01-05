@@ -41,6 +41,8 @@ type Client struct {
 	Logger            *slog.Logger
 	HeartbeatInterval time.Duration
 	TimeSyncedAt      time.Time // When NTP sync occurred. Zero if never synced.
+	Username          string    // MQTT broker username (optional)
+	Password          string    // MQTT broker password (optional, requires Username)
 }
 
 func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lcdMessages chan<- lcd.Message, ntpDone chan<- struct{}) error {
@@ -137,6 +139,15 @@ func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, l
 	}
 	var varconn mqtt.VariablesConnect
 	varconn.SetDefaultMQTT([]byte(c.ID))
+
+	// Set authentication credentials if provided
+	if c.Username != "" {
+		varconn.Username = []byte(c.Username)
+		if c.Password != "" {
+			varconn.Password = []byte(c.Password)
+		}
+	}
+
 	mqttClient := mqtt.NewClient(cfg)
 
 	// Connection loop for TCP+MQTT.
