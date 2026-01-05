@@ -201,6 +201,8 @@ func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, l
 
 		lcd.Send(lcdMessages, "MQTT Connected", "Publishing...")
 
+		heartbeat := time.NewTicker(c.HeartbeatInterval)
+		defer heartbeat.Stop()
 		for mqttClient.IsConnected() {
 			select {
 			case reading := <-readings:
@@ -216,13 +218,15 @@ func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, l
 					c.Logger.Error("mqtt:publish-failed", slog.Any("reason", err))
 					continue
 				}
-				c.Logger.Info("published message", slog.Uint64("packetID", uint64(pubVar.PacketIdentifier)))
+				c.Logger.Info("published message",
+					slog.Uint64("packetID", uint64(pubVar.PacketIdentifier)),
+				)
 				err = mqttClient.HandleNext()
 				if err != nil {
 					c.Logger.Error("mqtt:handle-next-failed", slog.String("err", err.Error()))
 					continue
 				}
-			case <-time.After(c.HeartbeatInterval):
+			case <-heartbeat.C:
 				// If we haven't read any sensor readings from the channel since the last heartbeat interval,
 				// ping the MQTT broken to keep the connnection alive.
 				err = mqttClient.HandleNext()

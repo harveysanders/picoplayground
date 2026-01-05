@@ -33,7 +33,42 @@ var mqttPassword string
 const (
 	max16Bit uint16  = 65535 // Max ADC value. The Pico has an onboard 16-bit ADC.
 	sysV     float32 = 3.3   // Logic level in volts. Pico runs at 3.3VDC.
+
+	// Burst sampling configuration
+	sampleIntervalSec  = 1   // ADC sampling interval in seconds.
+	burstSize          = 32  // Number of samples per burst
+	interSampleDelayUs = 500 // Delay between samples (microseconds)
 )
+
+// burstSample takes a burst of samples from the ADC and
+// averages them into a single value.
+//
+//  1. Discard first ADC read (sample & hold warm-up)
+//  2. Take n samples with inter-sample delay
+//  3. Return arithmetic mean
+func burstSample(sensor machine.ADC) uint16 {
+	// Step 1: Discard first read
+	_ = sensor.Get()
+
+	// Step 2: Stack-allocated array for burst samples
+	var samples [burstSize]uint16
+
+	for i := 0; i < burstSize; i++ {
+		samples[i] = sensor.Get()
+		if i < burstSize-1 { // Don't delay after last sample
+			time.Sleep(interSampleDelayUs * time.Microsecond)
+		}
+	}
+
+	// Step 3: Compute arithmetic mean
+	// Use uint32 to avoid overflow: 32 * 65535 = 2,097,120
+	var sum uint32
+	for i := 0; i < burstSize; i++ {
+		sum += uint32(samples[i])
+	}
+
+	return uint16(sum / burstSize)
+}
 
 func main() {
 	start := time.Now()
@@ -73,12 +108,13 @@ func main() {
 	go handler.Run()
 
 	c := &mqtt.Client{
-		ID:         "tinygo-mqtt",
-		Logger:     logger,
-		Timeout:    5 * time.Second,
-		TCPBufSize: 2030, // MTU - ethhdr - iphdr - tcphdr
-		Username:   mqttUsername,
-		Password:   mqttPassword,
+		ID:                "tinygo-mqtt",
+		Logger:            logger,
+		Timeout:           5 * time.Second,
+		TCPBufSize:        2030, // MTU - ethhdr - iphdr - tcphdr
+		Username:          mqttUsername,
+		Password:          mqttPassword,
+		HeartbeatInterval: 45 * time.Second,
 	}
 
 	// Buffered channel of 10 readings. We may need to adjust depending
@@ -96,8 +132,6 @@ func main() {
 		}
 	}()
 
-	time.Sleep(10 * time.Second)
-
 	// Read sensor, display readings on LCD and send off to MQTT broker
 	// _________________________________________________________________
 
@@ -107,12 +141,32 @@ func main() {
 	line1 := make([]byte, 0, 20)
 	line2 := make([]byte, 0, 20)
 	const floatNoExp = 'f'
+
+	// Wait for NTP (wall-clock) sync to complete (or fail) before starting time-based sampling.
+	// This ensures nextSampleTime calculations use stable and won't
+	// be invalidated by mid-loop NTP adjustments via runtime.AdjustTimeOffset().
+	<-ntpDone
+	logger.Info("sample interval", slog.Int("v", sampleIntervalSec))
+
+	// Initialize next sample time for interval-based sampling
+	nextSampleTime := time.Now().Add(time.Duration(sampleIntervalSec) * time.Second)
+
 	for {
 		// reslice the buffers to zero-length so append continues to work
 		line1 = line1[:0]
 		line2 = line2[:0]
 
-		val := sensor.Get()
+		// Wait until next sampling interval
+		now := time.Now()
+		if now.Before(nextSampleTime) {
+			time.Sleep(nextSampleTime.Sub(now))
+		}
+
+		// Perform burst sampling
+		val := burstSample(sensor)
+
+		// Update next sample time (before processing to maintain consistent intervals)
+		nextSampleTime = nextSampleTime.Add(time.Duration(sampleIntervalSec) * time.Second)
 		percentage := (float32(val) / float32(max16Bit))
 		voltage := percentage * sysV
 
@@ -156,10 +210,10 @@ func main() {
 			// Still waiting on NTP. Don't send any readings to MQTT yet.
 		}
 
+		// Single LED blink to indicate burst sampling completed
 		debugLED.High()
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		debugLED.Low()
-		time.Sleep(250 * time.Millisecond)
 	}
 }
 
