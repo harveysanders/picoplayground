@@ -9,6 +9,8 @@ import (
 
 	"github.com/harveysanders/picoplayground/mqttsensor/lcd"
 	"github.com/harveysanders/picoplayground/mqttsensor/mqtt"
+	"github.com/harveysanders/picoplayground/mqttsensor/weather"
+	"tinygo.org/x/drivers/dht"
 	"tinygo.org/x/drivers/hd44780i2c"
 )
 
@@ -79,9 +81,15 @@ func main() {
 	debugLED := machine.GP21
 	debugLED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 
+	btn := machine.GPIO22
+	btn.Configure(machine.PinConfig{Mode: machine.PinInputPullup})
+
 	machine.InitADC()
 	sensor := machine.ADC{Pin: machine.ADC0}
 	sensor.Configure(machine.ADCConfig{})
+
+	// Setup DHT11 temperature/humidity sensor
+	weatherSensor := weather.New(machine.GPIO0, dht.F)
 
 	// Setup LCD display over I2C
 	err := machine.I2C0.Configure(machine.I2CConfig{
@@ -165,21 +173,37 @@ func main() {
 		// Perform burst sampling
 		val := burstSample(sensor)
 
+		// Read temperature and humidity from DHT11
+		// Note: ReadMeasurements uses throttling/caching, so it returns cached values
+		// when called too frequently (< 2s interval) or on sensor error
+		temp, humidity, isCached, err := weatherSensor.ReadMeasurements()
+		if err != nil {
+			if isCached {
+				// Using cached values - log at INFO level (less critical)
+				logger.Info("dht11 read failed, using cached values", slog.Any("reason", err))
+			} else {
+				// No cached values available - log at ERROR level (critical)
+				logger.Error("dht11 read failed, no cached data", slog.Any("reason", err))
+			}
+		}
+
 		// Update next sample time (before processing to maintain consistent intervals)
 		nextSampleTime = nextSampleTime.Add(time.Duration(sampleIntervalSec) * time.Second)
 		percentage := (float32(val) / float32(max16Bit))
 		voltage := percentage * sysV
 
-		// Ex line1: "V: 3.2, 97.0%"
-		line1 = append(line1, "V: "...)
+		// Ex line1: "ADC: 3.2v, 63452"
+		line1 = append(line1, "ADC: "...)
 		line1 = strconv.AppendFloat(line1, float64(voltage), floatNoExp, 1, 32)
-		line1 = append(line1, ", "...)
-		line1 = strconv.AppendFloat(line1, float64(percentage*100), floatNoExp, 1, 32)
-		line1 = append(line1, "%"...)
+		line1 = append(line1, "v, "...)
+		line1 = strconv.AppendUint(line1, uint64(val), 10)
 
-		// Ex line2: "16-bit: 63452"
-		line2 = append(line2, "16-bit: "...)
-		line2 = strconv.AppendUint(line2, uint64(val), 10)
+		// Ex line2: "Temp:22.5C H:45%"
+		line2 = append(line2, "Temp:"...)
+		line2 = strconv.AppendFloat(line2, float64(temp), floatNoExp, 1, 32)
+		line2 = append(line2, "F H:"...)
+		line2 = strconv.AppendInt(line2, int64(humidity), 10)
+		line2 = append(line2, "%"...)
 
 		// Non-blocking send to LCD
 		select {
@@ -192,6 +216,8 @@ func main() {
 		reading := mqtt.SensorReading{
 			Voltage:     voltage,
 			RawUInt16:   val,
+			Temperature: temp,
+			Humidity:    humidity,
 			SinceBootNS: time.Since(start),
 		}
 		// Only set Timestamp if NTP sync succeeded

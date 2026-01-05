@@ -22,16 +22,18 @@ import (
 var (
 	pubFlags, _ = mqtt.NewPublishFlags(mqtt.QoS0, false, false)
 	pubVar      = mqtt.VariablesPublish{
-		TopicName:        []byte("tinygo-pico-test"),
+		TopicName:        []byte("tests/43"),
 		PacketIdentifier: 0xc0fe,
 	}
 )
 
 type SensorReading struct {
 	Voltage     float32
-	RawUInt16   uint16
-	SinceBootNS time.Duration
-	Timestamp   time.Time // Wall-clock time. Zero if NTP sync failed.
+	RawUInt16   uint16        // Raw ADC value
+	Temperature float32       // Temperature from DHT11
+	Humidity    float32       // Relative humidity percentage from DHT11
+	SinceBootNS time.Duration // Nanoseconds since boot.
+	Timestamp   time.Time     // Wall-clock time. Zero if NTP sync failed.
 }
 
 type Client struct {
