@@ -3,20 +3,16 @@ package mqtt
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
 	"net/netip"
 	"runtime"
 	"time"
 
 	"github.com/harveysanders/picoplayground/mqttsensor/cyw43439"
 	"github.com/harveysanders/picoplayground/mqttsensor/lcd"
-	"github.com/harveysanders/picoplayground/mqttsensor/ntp"
+	"github.com/soypat/lneto/tcp"
 	mqtt "github.com/soypat/natiu-mqtt"
-	"github.com/soypat/seqs"
-	"github.com/soypat/seqs/stacks"
 )
 
 var (
@@ -47,51 +43,15 @@ type Client struct {
 	Password          string    // MQTT broker password (optional, requires Username)
 }
 
-func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, lcdMessages chan<- lcd.Message, ntpDone chan<- struct{}) error {
-	// Close the ntpDone channel if we return early on an error.
-	defer func() {
-		close(ntpDone)
-	}()
-
-	lcd.Send(lcdMessages, "Connecting to", "WiFi...")
-	dchpClient, stack, _, err := cyw43439.SetupWithDHCP(cyw43439.SetupConfig{
-		Hostname: c.ID,
-		Logger:   c.Logger,
-		TCPPorts: 1, // For MQTT over TCP.
-		UDPPorts: 2, // For DNS (MQTT + NTP) and NTP client.
-	})
-	if err != nil {
-		return errors.New("setup DHCP:" + err.Error())
-	}
-
-	dnsResolver, err := cyw43439.NewResolver(stack, dchpClient)
-	if err != nil {
-		return errors.New("dns resolver:" + err.Error())
-	}
-
-	// Get router's hardware address from resolver (it's already been resolved during DNS lookup).
-	// We need the router's MAC address to send packets through the gateway to the internet.
-	serverHWAddr, err := dnsResolver.RouterHWAddr()
-	if err != nil {
-		return errors.New("router hwaddr:" + err.Error())
-	}
-	c.Logger.Info(fmt.Sprintf("router hwaddr: %x", (serverHWAddr[0:6])))
-
-	// Sync system time via NTP
-	lcd.Send(lcdMessages, "Syncing time", "via NTP...")
-	err = ntp.SyncTime(stack, dnsResolver, serverHWAddr, c.Logger)
-	if err != nil {
-		c.Logger.Error("ntp sync failed", slog.String("reason", err.Error()))
-		lcd.Send(lcdMessages, "NTP sync failed", "Continuing...")
-		time.Sleep(2 * time.Second)
-	} else {
-		c.TimeSyncedAt = time.Now()
-		lcd.Send(lcdMessages, "Time synced", c.TimeSyncedAt.Format("15:04:05"))
-		c.Logger.Info("ntp:success", slog.Time("time", c.TimeSyncedAt))
-		time.Sleep(2 * time.Second)
-	}
-	// Signal we're done with NTP, even if it fails
-	close(ntpDone)
+// ConnectAndPublish connects to the MQTT broker and publishes sensor readings.
+// The stack is provided from main.go where WiFi/DHCP/NTP are set up.
+func (c *Client) ConnectAndPublish(
+	stack *cyw43439.Stack,
+	addr string,
+	readings <-chan SensorReading,
+	lcdMessages chan<- lcd.Message,
+) error {
+	const pollTime = 5 * time.Millisecond
 
 	c.Logger.Info("MQTT address: " + addr)
 
@@ -101,36 +61,28 @@ func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, l
 		return errors.New("parsing host:port from " + addr + ": " + err.Error())
 	}
 
-	addrs, err := dnsResolver.LookupNetIP(mqttHost)
-	if err != nil {
-		return errors.New("dns lookup for " + mqttHost + ": " + err.Error())
+	lnetoStack := stack.LnetoStack()
+	rstack := lnetoStack.StackRetrying(pollTime)
+
+	// Try to parse as IP first, otherwise DNS lookup
+	var mqttAddr netip.Addr
+	if parsedAddr, err := netip.ParseAddr(mqttHost); err == nil {
+		mqttAddr = parsedAddr
+	} else {
+		// DNS lookup for MQTT server
+		c.Logger.Info("dns:resolving " + mqttHost)
+		addrs, err := rstack.DoLookupIP(mqttHost, 5*time.Second, 3)
+		if err != nil {
+			return errors.New("dns lookup for " + mqttHost + ": " + err.Error())
+		}
+		if len(addrs) == 0 {
+			return errors.New("dns lookup for " + mqttHost + ": no addresses returned")
+		}
+		mqttAddr = addrs[0]
 	}
 
-	// Set up MQTT client and broker connection
-	mqttAddr := addrs[0]
 	c.Logger.Info("resolved IP: " + mqttAddr.String())
 	port := parsePort(portStr)
-
-	start := time.Now()
-	rng := rand.New(rand.NewSource(int64(time.Now().Sub(start))))
-	// Start TCP server.
-	clientAddr := netip.AddrPortFrom(stack.Addr(), uint16(rng.Intn(65535-1024)+1024))
-	conn, err := stacks.NewTCPConn(stack, stacks.TCPConnConfig{
-		TxBufSize: uint16(c.TCPBufSize),
-		RxBufSize: uint16(c.TCPBufSize),
-	})
-	if err != nil {
-		panic("conn create:" + err.Error())
-	}
-
-	closeConn := func(err string) {
-		slog.Error("tcpconn:closing", slog.String("err", err))
-		conn.Close()
-		for !conn.State().IsClosed() {
-			slog.Info("tcpconn:waiting", slog.String("state", conn.State().String()))
-			time.Sleep(1000 * time.Millisecond)
-		}
-	}
 
 	cfg := mqtt.ClientConfig{
 		Decoder: mqtt.DecoderNoAlloc{UserBuffer: make([]byte, 4096)},
@@ -152,40 +104,60 @@ func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, l
 
 	mqttClient := mqtt.NewClient(cfg)
 
+	// Configure TCP connection
+	var conn tcp.Conn
+	err = conn.Configure(tcp.ConnConfig{
+		RxBuf:             make([]byte, c.TCPBufSize),
+		TxBuf:             make([]byte, c.TCPBufSize),
+		TxPacketQueueSize: 3,
+	})
+	if err != nil {
+		return errors.New("tcp configure:" + err.Error())
+	}
+
+	closeConn := func(reason string) {
+		slog.Error("tcpconn:closing", slog.String("reason", reason))
+		conn.Close()
+		// Wait for connection to close
+		for i := 0; i < 50 && !conn.State().IsClosed(); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+		conn.Abort()
+	}
+
+	serverAddr := netip.AddrPortFrom(mqttAddr, port)
+
 	// Connection loop for TCP+MQTT.
 	for {
-		random := rng.Uint32()
-		c.Logger.Info("socket:listen")
+		// Use stack's PRNG for random port
+		localPort := uint16(lnetoStack.Prand32()>>17) + 1024
+		c.Logger.Info("socket:dialing", slog.Uint64("localPort", uint64(localPort)))
 		lcd.Send(lcdMessages, "addr", addr)
-		err = conn.OpenDialTCP(clientAddr.Port(), serverHWAddr, netip.AddrPortFrom(mqttAddr, port), seqs.Value(random))
-		if err != nil {
-			panic("socket dial:" + err.Error())
-		}
+
+		// Dial TCP using the retrying stack (handles handshake with retries)
 		lcd.Send(lcdMessages, "Connecting...", "TCP handshake")
-		retries := 50
-		c.Logger.Info(conn.State().String())
-		for conn.State() != seqs.StateEstablished && retries > 0 {
-			time.Sleep(100 * time.Millisecond)
-			retries--
-		}
-		if retries == 0 {
-			c.Logger.Info("socket:no-establish")
-			closeConn("did not establish connection")
+		err = rstack.DoDialTCP(&conn, localPort, serverAddr, 10*time.Second, 3)
+		if err != nil {
+			c.Logger.Error("socket:dial-failed", slog.String("err", err.Error()))
+			closeConn("dial failed: " + err.Error())
+			time.Sleep(2 * time.Second)
 			continue
 		}
+
+		c.Logger.Info("tcp:connected", slog.String("state", conn.State().String()))
 
 		// We start MQTT connect with a deadline on the socket.
 		c.Logger.Info("mqtt:start-connecting")
 		lcd.Send(lcdMessages, "MQTT Connect", "Authenticating")
 		conn.SetDeadline(time.Now().Add(c.Timeout))
-		err = mqttClient.StartConnect(conn, &varconn)
+		err = mqttClient.StartConnect(&conn, &varconn)
 		if err != nil {
 			c.Logger.Error("mqtt:start-connect-failed", slog.String("reason", err.Error()))
 			lcd.Send(lcdMessages, "Connect Failed", err.Error()[:min(len(err.Error()), 16)])
 			closeConn("connect failed")
 			continue
 		}
-		retries = 50
+		retries := 50
 		for retries > 0 && !mqttClient.IsConnected() {
 			time.Sleep(100 * time.Millisecond)
 			err = mqttClient.HandleNext()
@@ -214,7 +186,7 @@ func (c *Client) ConnectAndPublish(addr string, readings <-chan SensorReading, l
 					continue
 				}
 				conn.SetDeadline(time.Now().Add(c.Timeout))
-				pubVar.PacketIdentifier = uint16(rng.Uint32())
+				pubVar.PacketIdentifier = uint16(lnetoStack.Prand32())
 				err = mqttClient.PublishPayload(pubFlags, pubVar, payload)
 				if err != nil {
 					c.Logger.Error("mqtt:publish-failed", slog.Any("reason", err))

@@ -4,11 +4,14 @@ import (
 	"errors"
 	"log/slog"
 	"machine"
+	"net/netip"
 	"strconv"
 	"time"
 
+	"github.com/harveysanders/picoplayground/mqttsensor/cyw43439"
 	"github.com/harveysanders/picoplayground/mqttsensor/lcd"
 	"github.com/harveysanders/picoplayground/mqttsensor/mqtt"
+	"github.com/harveysanders/picoplayground/mqttsensor/ntp"
 	"github.com/harveysanders/picoplayground/mqttsensor/weather"
 	"tinygo.org/x/drivers/dht"
 	"tinygo.org/x/drivers/hd44780i2c"
@@ -108,6 +111,7 @@ func main() {
 		}
 	}
 
+	lcdDev.BacklightOn(false)
 	lcdDev.ClearDisplay()
 
 	// Create channel and start LCD handler goroutine
@@ -128,14 +132,61 @@ func main() {
 	// Buffered channel of 10 readings. We may need to adjust depending
 	// on the sensor read frequency and network availability
 	sensorReadings := make(chan mqtt.SensorReading, 10)
-	// Need a single to know when NTP sync is complete. We won't record messages until device time
-	// is syncd with NTP (or fails)
-	ntpDone := make(chan struct{})
+
+	// ------------------------------------------------------------------
+	// Network initialization (WiFi, DHCP, NTP) - done before MQTT goroutine
+	// ------------------------------------------------------------------
+
+	// 1. Create WiFi stack
+	lcd.Send(lcdMessages, "Connecting to", "WiFi...")
+	cystack, err := cyw43439.NewConfiguredPicoWithStack(
+		cyw43439.SSID(),
+		cyw43439.Password(),
+		cyw43439.DefaultWifiConfig(),
+		cyw43439.StackConfig{
+			Hostname:    c.ID,
+			MaxTCPPorts: 1,
+			Logger:      logger,
+		},
+	)
+	if err != nil {
+		printErrForever(logger, "wifi stack setup", slog.Any("reason", err))
+	}
+
+	// 2. Start background packet processing (REQUIRED)
+	go loopForeverStack(cystack)
+
+	// 3. DHCP
+	lcd.Send(lcdMessages, "Getting IP", "via DHCP...")
+	dhcpResults, err := cystack.SetupWithDHCP(cyw43439.DHCPConfig{
+		RequestedAddr: netip.AddrFrom4([4]byte{192, 168, 1, 99}),
+		Hostname:      c.ID,
+	})
+	if err != nil {
+		printErrForever(logger, "DHCP setup", slog.Any("reason", err))
+	}
+	logger.Info("dhcp complete", slog.String("ip", dhcpResults.AssignedAddr.String()))
+
+	// 4. NTP sync (before starting MQTT goroutine)
+	lcd.Send(lcdMessages, "Syncing time", "via NTP...")
+	err = ntp.SyncTime(cystack.LnetoStack(), logger)
+	if err != nil {
+		logger.Error("ntp sync failed", slog.String("reason", err.Error()))
+		lcd.Send(lcdMessages, "NTP sync failed", "Continuing...")
+		time.Sleep(2 * time.Second)
+	} else {
+		c.TimeSyncedAt = time.Now()
+		lcd.Send(lcdMessages, "Time synced", c.TimeSyncedAt.Format("15:04:05"))
+		logger.Info("ntp:success", slog.Time("time", c.TimeSyncedAt))
+		time.Sleep(2 * time.Second)
+	}
+
+	// 5. Start MQTT in goroutine (pass stack)
 	go func() {
-		err := c.ConnectAndPublish(mqttServerAddr, sensorReadings, lcdMessages, ntpDone)
+		err := c.ConnectAndPublish(cystack, mqttServerAddr, sensorReadings, lcdMessages)
 		if err != nil {
 			// Print error in a loop in case the serial monitor is not
-			// ready before the inital messages
+			// ready before the initial messages
 			printErrForever(logger, "connect to MQTT broker", slog.Any("reason", err))
 		}
 	}()
@@ -150,10 +201,7 @@ func main() {
 	line2 := make([]byte, 0, 20)
 	const floatNoExp = 'f'
 
-	// Wait for NTP (wall-clock) sync to complete (or fail) before starting time-based sampling.
-	// This ensures nextSampleTime calculations use stable and won't
-	// be invalidated by mid-loop NTP adjustments via runtime.AdjustTimeOffset().
-	<-ntpDone
+	// NTP is now complete (or failed) at this point - no need to wait
 	logger.Info("sample interval", slog.Int("v", sampleIntervalSec))
 
 	// Initialize next sample time for interval-based sampling
@@ -226,20 +274,26 @@ func main() {
 		}
 
 		select {
-		case <-ntpDone:
-			select {
-			case sensorReadings <- reading:
-			default:
-				// Channel full - drop this reading to keep LCD responsive
-			}
+		case sensorReadings <- reading:
 		default:
-			// Still waiting on NTP. Don't send any readings to MQTT yet.
+			// Channel full - drop this reading to keep LCD responsive
 		}
 
 		// Single LED blink to indicate burst sampling completed
 		debugLED.High()
 		time.Sleep(100 * time.Millisecond)
 		debugLED.Low()
+	}
+}
+
+// loopForeverStack runs the network stack's send/receive loop.
+// This must run in a background goroutine for networking to function.
+func loopForeverStack(stack *cyw43439.Stack) {
+	for {
+		send, recv, _ := stack.RecvAndSend()
+		if send == 0 && recv == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 }
 

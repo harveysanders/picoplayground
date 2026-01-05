@@ -6,9 +6,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/harveysanders/picoplayground/mqttsensor/cyw43439"
-	"github.com/soypat/seqs/eth/ntp"
-	"github.com/soypat/seqs/stacks"
+	"github.com/soypat/lneto/x/xnet"
 )
 
 // SyncTime synchronizes the system time using NTP.
@@ -16,55 +14,30 @@ import (
 // and adjusts the system clock accordingly.
 //
 // Returns nil on success, error if sync fails.
-func SyncTime(
-	stack *stacks.PortStack,
-	resolver *cyw43439.Resolver,
-	routerHWAddr [6]byte,
-	logger *slog.Logger,
-) error {
-	// Resolve NTP server address
+func SyncTime(stack *xnet.StackAsync, logger *slog.Logger) error {
+	const pollTime = 5 * time.Millisecond
+	rstack := stack.StackRetrying(pollTime)
+
+	// DNS lookup for NTP server (built-in, no custom Resolver needed)
 	logger.Info("ntp:resolving pool.ntp.org")
-	addrs, err := resolver.LookupNetIP("pool.ntp.org")
+	addrs, err := rstack.DoLookupIP("pool.ntp.org", 5*time.Second, 3)
 	if err != nil {
 		return errors.New("ntp dns lookup:" + err.Error())
 	}
 	if len(addrs) == 0 {
 		return errors.New("ntp dns lookup: no addresses returned")
 	}
+	logger.Info("ntp:resolved", slog.String("addr", addrs[0].String()))
 
-	ntpAddr := addrs[0]
-	logger.Info("ntp:resolved", slog.String("addr", ntpAddr.String()))
-
-	// Create NTP client
-	ntpc := stacks.NewNTPClient(stack, ntp.ClientPort)
-	err = ntpc.BeginDefaultRequest(routerHWAddr, ntpAddr)
+	// Perform NTP request (built-in, no manual polling)
+	logger.Info("ntp:requesting time")
+	offset, err := rstack.DoNTP(addrs[0], 5*time.Second, 3)
 	if err != nil {
 		return errors.New("ntp request:" + err.Error())
 	}
 
-	// Wait for NTP response (with timeout)
-	logger.Info("ntp:waiting for response")
-	const timeout = 5 * time.Second
-	const pollInterval = 100 * time.Millisecond
-	start := time.Now()
-	for !ntpc.IsDone() {
-		if time.Since(start) > timeout {
-			return errors.New("ntp timeout")
-		}
-		time.Sleep(pollInterval)
-	}
-
-	// Calculate and apply time offset
-	// NTP base time is 1900-01-01T00:00:00.000Z
-	offset := ntp.BaseTime().
-		// Add the diff from actual now (from NTP) and 1900-01-01
-		// This offset is going to stop working around 2036-02-07
-		// https://docs.ntpsec.org/latest/rollover.html
-		Add(ntpc.Offset()).
-		// Subtract the device's time (some time close to 0 unix time (1970-01-01...))
-		Sub(time.Now())
-
-		// Use the offset to set the device's time
+	// Apply time offset
 	runtime.AdjustTimeOffset(int64(offset))
+	logger.Info("ntp:complete", slog.Duration("offset", offset))
 	return nil
 }

@@ -1,7 +1,9 @@
 github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 h1:El6M4kTTCOh6aBiKaUGG7oYTSPP8MxqL4YI3kZKwcP4=
 github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510/go.mod h1:pupxD2MaaD3pAXIBCelhxNneeOaAeabZDe5s4K6zSpQ=
-github.com/soypat/cyw43439 v0.0.0-20251110224555-0a1d121ea3af h1:8nA66+N/Fw5M3FwSNoZuvuWBjauMaryoETiXs940nIA=
-github.com/soypat/cyw43439 v0.0.0-20251110224555-0a1d121ea3af/go.mod h1:MUaGO5m6X7xrkHrPDmnaxCEcuCCFN/0ZFh9oie+exbU=
+github.com/soypat/cyw43439 v0.0.0-20260112220010-064a839f63bb h1:qF3a7qm4uKwRcxPWexEIw7lpQaeTcPkTUY8sd+lcZqM=
+github.com/soypat/cyw43439 v0.0.0-20260112220010-064a839f63bb/go.mod h1:oXpTlhrJ/HxN5Ipu5Z57eLI8jadcrUf1eS00PezD9hQ=
+github.com/soypat/lneto v0.0.0-20260115213117-80b740827f0a h1:mLOM7zbsjZ7Q73Abepq97VJsOXUBQnpqSX1xynzOIUg=
+github.com/soypat/lneto v0.0.0-20260115213117-80b740827f0a/go.mod h1:g/8Lk+hIsMZydyWDJjK2YfsCuG6jA5mWCO6U+4S7w1U=
 github.com/soypat/natiu-mqtt v0.6.0 h1:ddrem9iAqFYtQOx2C7AhCizhPXXmGZs1T5fkvLroPO4=
 github.com/soypat/natiu-mqtt v0.6.0/go.mod h1:xEta+cwop9izVCW7xOx2W+ct9PRMqr0gNVkvBPnQTc4=
 github.com/soypat/seqs v0.0.0-20250630134107-01c3f05666ba h1:NaIxs8iRVTAGBY4xiCy1Jqex3mIPodyLHppYvxUjJEk=

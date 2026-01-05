@@ -5,8 +5,7 @@
 //   - Initializing the CYW43439 WiFi device
 //   - Joining WPA2-secured or open WiFi networks
 //   - Performing DHCP configuration with fallback to static IP
-//   - DNS hostname resolution
-//   - ARP hardware address resolution
+//   - DNS hostname resolution via lneto stack
 //   - Asynchronous network packet handling
 //
 // The code is adapted from the examples in the soypat/cyw43439 repository:
@@ -24,32 +23,63 @@ import (
 	"time"
 
 	"github.com/soypat/cyw43439"
-	"github.com/soypat/seqs/eth/dhcp"
-	"github.com/soypat/seqs/eth/dns"
-	"github.com/soypat/seqs/stacks"
+	"github.com/soypat/lneto/x/xnet"
 )
 
 const mtu = cyw43439.MTU
-
-type SetupConfig struct {
-	// DHCP requested hostname.
-	Hostname string
-	// DHCP requested IP address. On failing to find DHCP server is used as static IP.
-	RequestedIP string
-	Logger      *slog.Logger
-	// Number of UDP ports to open for the stack. (we'll actually open one more than this for DHCP)
-	UDPPorts uint16
-	// Number of TCP ports to open for the stack.
-	TCPPorts uint16
-}
 
 var (
 	ssid string
 	pass string
 )
 
-func SetupWithDHCP(cfg SetupConfig) (*stacks.DHCPClient, *stacks.PortStack, *cyw43439.Device, error) {
-	cfg.UDPPorts++ // Add extra UDP port for DHCP client.
+// SSID returns the WiFi SSID set via linker flags.
+func SSID() string { return ssid }
+
+// Password returns the WiFi password set via linker flags.
+func Password() string { return pass }
+
+// DefaultWifiConfig returns the default WiFi configuration for the CYW43439 device.
+func DefaultWifiConfig() cyw43439.Config {
+	return cyw43439.DefaultWifiConfig()
+}
+
+// StackConfig configures the lneto stack.
+type StackConfig struct {
+	// Hostname is used for DHCP requests.
+	Hostname string
+	// MaxTCPPorts is the number of TCP ports to open for the stack.
+	MaxTCPPorts int
+	// Logger for stack operations.
+	Logger *slog.Logger
+	// RandSeed is an optional random seed for the stack's PRNG.
+	RandSeed int64
+}
+
+// DHCPConfig configures the DHCP request.
+type DHCPConfig struct {
+	// RequestedAddr is the preferred IP address to request via DHCP.
+	// If DHCP fails and this is set, it will be used as a static IP.
+	RequestedAddr netip.Addr
+	// Hostname is used in the DHCP request.
+	Hostname string
+}
+
+// Stack wraps the lneto StackAsync and CYW43439 device for network operations.
+type Stack struct {
+	s       xnet.StackAsync
+	dev     *cyw43439.Device
+	log     *slog.Logger
+	sendbuf []byte
+}
+
+// NewConfiguredPicoWithStack creates a new WiFi stack with the given configuration.
+// It initializes the CYW43439 device, joins the WiFi network, and prepares the stack.
+func NewConfiguredPicoWithStack(ssid, pass string, wificfg cyw43439.Config, cfg StackConfig) (*Stack, error) {
+	if cfg.Hostname == "" {
+		return nil, errors.New("empty hostname")
+	}
+
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
@@ -57,34 +87,24 @@ func SetupWithDHCP(cfg SetupConfig) (*stacks.DHCPClient, *stacks.PortStack, *cyw
 		}))
 	}
 
-	var err error
-	var reqAddr netip.Addr
-	if cfg.RequestedIP != "" {
-		reqAddr, err = netip.ParseAddr(cfg.RequestedIP)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-	}
-
+	start := time.Now()
 	dev := cyw43439.NewPicoWDevice()
-	wificfg := cyw43439.DefaultWifiConfig()
-	wificfg.Logger = logger
-	// cfg.Logger = logger // Uncomment to see in depth info on wifi device functioning.
-	logger.Info("initializing pico W device...")
-	devInitTime := time.Now()
+	dev.SetLogger(logger)
 
-	err = dev.Init(wificfg)
+	logger.Info("initializing pico W device...")
+	err := dev.Init(wificfg)
 	if err != nil {
-		return nil, nil, nil, errors.New("wifi init failed:" + err.Error())
+		return nil, errors.New("wifi init failed:" + err.Error())
 	}
-	logger.Info("cyw43439:Init", slog.Duration("duration", time.Since(devInitTime)))
+	logger.Info("cyw43439:Init", slog.Duration("duration", time.Since(start)))
+
 	if len(pass) == 0 {
 		logger.Info("joining open network:", slog.String("ssid", ssid))
 	} else {
 		logger.Info("joining WPA secure network", slog.String("ssid", ssid), slog.Int("passlen", len(pass)))
 	}
+
 	for {
-		// Set ssid/pass in secrets.go
 		err = dev.JoinWPA2(ssid, pass)
 		if err == nil {
 			break
@@ -92,293 +112,142 @@ func SetupWithDHCP(cfg SetupConfig) (*stacks.DHCPClient, *stacks.PortStack, *cyw
 		logger.Error("wifi join failed", slog.String("err", err.Error()))
 		time.Sleep(5 * time.Second)
 	}
-	mac, _ := dev.HardwareAddr6()
+
+	mac, err := dev.HardwareAddr6()
+	if err != nil {
+		return nil, errors.New("get hardware address:" + err.Error())
+	}
 	logger.Info("wifi join success!", slog.String("mac", net.HardwareAddr(mac[:]).String()))
 
-	stack := stacks.NewPortStack(stacks.PortStackConfig{
-		MAC:             mac,
-		MaxOpenPortsUDP: int(cfg.UDPPorts),
-		MaxOpenPortsTCP: int(cfg.TCPPorts),
+	// Configure Stack
+	stack := &Stack{
+		dev:     dev,
+		log:     logger,
+		sendbuf: make([]byte, mtu),
+	}
+
+	maxTCP := cfg.MaxTCPPorts
+	if maxTCP < 1 {
+		maxTCP = 1
+	}
+
+	elapsed := time.Since(start)
+	err = stack.s.Reset(xnet.StackConfig{
+		Hostname:        cfg.Hostname,
+		MaxTCPConns:     maxTCP,
+		RandSeed:        elapsed.Nanoseconds() ^ cfg.RandSeed,
+		HardwareAddress: mac,
 		MTU:             mtu,
-		Logger:          logger,
-	})
-
-	dev.RecvEthHandle(stack.RecvEth)
-
-	// Begin asynchronous packet handling.
-	go nicLoop(dev, stack)
-
-	// Perform DHCP request.
-	dhcpClient := stacks.NewDHCPClient(stack, dhcp.DefaultClientPort)
-	err = dhcpClient.BeginRequest(stacks.DHCPRequestConfig{
-		RequestedAddr: reqAddr,
-		Xid:           uint32(time.Now().Nanosecond()),
-		Hostname:      cfg.Hostname,
 	})
 	if err != nil {
-		return nil, stack, dev, errors.New("dhcp begin request:" + err.Error())
+		return nil, errors.New("stack reset:" + err.Error())
 	}
-	i := 0
-	for dhcpClient.State() != dhcp.StateBound {
-		i++
-		logger.Info("DHCP ongoing...")
-		time.Sleep(time.Second / 2)
-		if i > 15 {
-			if !reqAddr.IsValid() {
-				return dhcpClient, stack, dev, errors.New("DHCP did not complete and no static IP was requested")
-			}
-			logger.Info("DHCP did not complete, assigning static IP", slog.String("ip", cfg.RequestedIP))
-			stack.SetAddr(reqAddr)
-			return dhcpClient, stack, dev, nil
+
+	dev.RecvEthHandle(func(pkt []byte) error {
+		return stack.s.Demux(pkt, 0)
+	})
+
+	return stack, nil
+}
+
+// SetupWithDHCP performs DHCP configuration and returns the results.
+func (s *Stack) SetupWithDHCP(cfg DHCPConfig) (*xnet.DHCPResults, error) {
+	if !cfg.RequestedAddr.Is4() {
+		// If no address provided, use a zero address
+		if !cfg.RequestedAddr.IsValid() {
+			cfg.RequestedAddr = netip.AddrFrom4([4]byte{0, 0, 0, 0})
+		} else {
+			return nil, errors.New("only dhcpv4 supported")
 		}
 	}
-	var primaryDNS netip.Addr
-	dnsServers := dhcpClient.DNSServers()
-	if len(dnsServers) > 0 {
-		primaryDNS = dnsServers[0]
+
+	const pollTime = 50 * time.Millisecond
+	rstack := s.s.StackRetrying(pollTime)
+
+	s.log.Info("DHCP:starting")
+
+	dhcpResults, err := rstack.DoDHCPv4(cfg.RequestedAddr.As4(), 3*time.Second, 3)
+	if err != nil {
+		// If DHCP fails but we have a requested address, use it as static IP
+		if cfg.RequestedAddr.IsValid() && !cfg.RequestedAddr.IsUnspecified() {
+			s.log.Info("DHCP did not complete, assigning static IP", slog.String("ip", cfg.RequestedAddr.String()))
+			s.s.SetIPAddr(cfg.RequestedAddr)
+			return &xnet.DHCPResults{
+				AssignedAddr: cfg.RequestedAddr,
+			}, nil
+		}
+		return nil, errors.New("dhcp failed:" + err.Error())
 	}
-	ip := dhcpClient.Offer()
-	logger.Info("DHCP complete",
-		slog.Uint64("cidrbits", uint64(dhcpClient.CIDRBits())),
-		slog.String("ourIP", ip.String()),
-		slog.String("dns", primaryDNS.String()),
-		slog.String("broadcast", dhcpClient.BroadcastAddr().String()),
-		slog.String("gateway", dhcpClient.Gateway().String()),
-		slog.String("router", dhcpClient.Router().String()),
-		slog.String("dhcp", dhcpClient.DHCPServer().String()),
-		slog.String("hostname", string(dhcpClient.Hostname())),
-		slog.Duration("lease", dhcpClient.IPLeaseTime()),
-		slog.Duration("renewal", dhcpClient.RenewalTime()),
-		slog.Duration("rebinding", dhcpClient.RebindingTime()),
+
+	// Apply DHCP results to the stack
+	err = s.s.AssimilateDHCPResults(dhcpResults)
+	if err != nil {
+		return nil, errors.New("assimilate dhcp:" + err.Error())
+	}
+
+	// Resolve and set the router hardware address as the gateway
+	gatewayHW, err := rstack.DoResolveHardwareAddress6(dhcpResults.Router, 500*time.Millisecond, 4)
+	if err != nil {
+		return nil, errors.New("resolve gateway:" + err.Error())
+	}
+	s.s.SetGateway6(gatewayHW)
+
+	s.log.Info("DHCP complete",
+		slog.String("ourIP", dhcpResults.AssignedAddr.String()),
+		slog.String("gateway", dhcpResults.Gateway.String()),
+		slog.String("router", dhcpResults.Router.String()),
+		slog.Uint64("lease_sec", uint64(dhcpResults.TLease)),
 	)
 
-	stack.SetAddr(ip) // It's important to set the IP address after DHCP completes.
-	return dhcpClient, stack, dev, nil
+	return dhcpResults, nil
 }
 
-// ResolveHardwareAddr obtains the hardware address of the given IP address.
-func ResolveHardwareAddr(stack *stacks.PortStack, ip netip.Addr) ([6]byte, error) {
-	if !ip.IsValid() {
-		return [6]byte{}, errors.New("invalid ip")
+// RecvAndSend processes incoming and outgoing packets.
+// Returns the number of bytes sent and received, and any error.
+// This should be called in a loop from a goroutine.
+func (s *Stack) RecvAndSend() (send, recv int, err error) {
+	// Poll for incoming packets
+	gotPacket, errRecv := s.dev.PollOne()
+	if gotPacket {
+		recv = 1
 	}
-	arpc := stack.ARP()
-	arpc.Abort() // Remove any previous ARP requests.
-	err := arpc.BeginResolve(ip)
+	if errRecv != nil {
+		s.log.Error("RecvAndSend:PollOne", slog.String("err", errRecv.Error()))
+	}
+
+	// Handle outgoing packets via Encapsulate
+	send, err = s.s.Encapsulate(s.sendbuf, -1, 0)
 	if err != nil {
-		return [6]byte{}, err
+		s.log.Error("RecvAndSend:Encapsulate", slog.Int("plen", send), slog.String("err", err.Error()))
+	} else {
+		err = errRecv // Pass receive error if encapsulate succeeded
 	}
-	time.Sleep(4 * time.Millisecond)
-	// ARP exchanges should be fast, don't wait too long for them.
-	const timeout = time.Second
-	const maxretries = 20
-	retries := maxretries
-	for !arpc.IsDone() && retries > 0 {
-		retries--
-		if retries == 0 {
-			return [6]byte{}, errors.New("arp timed out")
-		}
-		time.Sleep(timeout / maxretries)
+
+	if send == 0 {
+		return send, recv, err
 	}
-	_, hw, err := arpc.ResultAs6()
-	return hw, err
-}
 
-type Resolver struct {
-	stack     *stacks.PortStack
-	dns       *stacks.DNSClient
-	dhcp      *stacks.DHCPClient
-	dnsaddr   netip.Addr
-	dnshwaddr [6]byte
-}
-
-func NewResolver(stack *stacks.PortStack, dhcp *stacks.DHCPClient) (*Resolver, error) {
-	dnsc := stacks.NewDNSClient(stack, dns.ClientPort)
-	dnsaddrs := dhcp.DNSServers()
-	if len(dnsaddrs) > 0 && !dnsaddrs[0].IsValid() {
-		return nil, errors.New("dns addr obtained via DHCP not valid")
-	}
-	return &Resolver{
-		stack:   stack,
-		dhcp:    dhcp,
-		dns:     dnsc,
-		dnsaddr: dnsaddrs[0],
-	}, nil
-}
-
-func (r *Resolver) LookupNetIP(host string) ([]netip.Addr, error) {
-	name, err := dns.NewName(host)
+	// Send the encapsulated packet
+	err = s.dev.SendEth(s.sendbuf[:send])
 	if err != nil {
-		return nil, err
-	}
-	err = r.updateDNSHWAddr()
-	if err != nil {
-		return nil, err
+		s.log.Error("RecvAndSend:SendEth", slog.Int("plen", send), slog.String("err", err.Error()))
 	}
 
-	// Abort any pending request so we can reuse the UDP port
-	// ! is it intentional that I need to abort and close the connection/port after use?
-	r.dns.Abort()
-	_ = r.stack.CloseUDP(53)
-
-	err = r.dns.StartResolve(r.dnsConfig(name))
-	if err != nil {
-		return nil, err
-	}
-	time.Sleep(5 * time.Millisecond)
-	retries := 100
-
-	for retries > 0 {
-		done, _ := r.dns.IsDone()
-		if done {
-			break
-		}
-		retries--
-		time.Sleep(20 * time.Millisecond)
-	}
-	done, rcode := r.dns.IsDone()
-	if !done && retries == 0 {
-		return nil, errors.New("dns lookup timed out")
-	} else if rcode != dns.RCodeSuccess {
-		return nil, errors.New("dns lookup failed:" + rcode.String())
-	}
-	answers := r.dns.Answers()
-	if len(answers) == 0 {
-		return nil, errors.New("no dns answers")
-	}
-	var addrs []netip.Addr
-	for i := range answers {
-		data := answers[i].RawData()
-		if len(data) == 4 {
-			addrs = append(addrs, netip.AddrFrom4([4]byte(data)))
-		}
-	}
-	if len(addrs) == 0 {
-		return nil, errors.New("no ipv4 dns answers")
-	}
-	return addrs, nil
+	return send, recv, err
 }
 
-// RouterHWAddr returns the hardware address of the router/gateway.
-// This is populated during DNS lookups if the DNS server is not on the local subnet.
-// If not yet populated, it performs ARP resolution.
-func (r *Resolver) RouterHWAddr() ([6]byte, error) {
-	// Check if we already have the hardware address
-	if r.dnshwaddr != [6]byte{} {
-		return r.dnshwaddr, nil
-	}
-
-	// Otherwise, resolve it
-	err := r.updateDNSHWAddr()
-	return r.dnshwaddr, err
+// LnetoStack returns the underlying lneto StackAsync for direct access.
+// This is needed for operations like TCP connections and DNS lookups.
+func (s *Stack) LnetoStack() *xnet.StackAsync {
+	return &s.s
 }
 
-func (r *Resolver) updateDNSHWAddr() (err error) {
-	picoIP := r.dhcp.Offer()
-
-	prefix, err := picoIP.Prefix(int(r.dhcp.CIDRBits()))
-	if err != nil {
-		return errors.New("could not get DHCP lease info to check subnet")
-	}
-
-	// Decide which IP to perform the ARP request for.
-	targetIP := r.dnsaddr
-
-	if !prefix.Contains(r.dnsaddr) {
-		// If the DNS server is NOT on our local subnet, we must send packets
-		// to the router/gateway instead.
-		targetIP = r.dhcp.Router()
-	}
-
-	r.dnshwaddr, err = ResolveHardwareAddr(r.stack, targetIP)
-	return err
+// Prand32 returns a pseudo-random 32-bit number from the stack's PRNG.
+func (s *Stack) Prand32() uint32 {
+	return s.s.Prand32()
 }
 
-func (r *Resolver) dnsConfig(name dns.Name) stacks.DNSResolveConfig {
-	return stacks.DNSResolveConfig{
-		Questions: []dns.Question{
-			{
-				Name:  name,
-				Type:  dns.TypeA,
-				Class: dns.ClassINET,
-			},
-		},
-		DNSAddr:         r.dnsaddr,
-		DNSHWAddr:       r.dnshwaddr,
-		EnableRecursion: true,
-	}
-}
-
-func nicLoop(dev *cyw43439.Device, Stack *stacks.PortStack) {
-	// Maximum number of packets to queue before sending them.
-	const (
-		queueSize                = 3
-		maxRetriesBeforeDropping = 3
-	)
-	var queue [queueSize][mtu]byte
-	var lenBuf [queueSize]int
-	var retries [queueSize]int
-	markSent := func(i int) {
-		queue[i] = [mtu]byte{} // Not really necessary.
-		lenBuf[i] = 0
-		retries[i] = 0
-	}
-	for {
-		stallRx := true
-		// Poll for incoming packets.
-		for i := 0; i < 1; i++ {
-			gotPacket, err := dev.PollOne()
-			if err != nil {
-				println("poll error:", err.Error())
-			}
-			if !gotPacket {
-				break
-			}
-			stallRx = false
-		}
-
-		// Queue packets to be sent.
-		for i := range queue {
-			if retries[i] != 0 {
-				continue // Packet currently queued for retransmission.
-			}
-			var err error
-			buf := queue[i][:]
-			lenBuf[i], err = Stack.HandleEth(buf[:])
-			if err != nil {
-				println("stack error n(should be 0)=", lenBuf[i], "err=", err.Error())
-				lenBuf[i] = 0
-				continue
-			}
-			if lenBuf[i] == 0 {
-				break
-			}
-		}
-		stallTx := lenBuf == [queueSize]int{}
-		if stallTx {
-			if stallRx {
-				// Avoid busy waiting when both Rx and Tx stall.
-				time.Sleep(51 * time.Millisecond)
-			}
-			continue
-		}
-
-		// Send queued packets.
-		for i := range queue {
-			n := lenBuf[i]
-			if n <= 0 {
-				continue
-			}
-			err := dev.SendEth(queue[i][:n])
-			if err != nil {
-				// Queue packet for retransmission.
-				retries[i]++
-				if retries[i] > maxRetriesBeforeDropping {
-					markSent(i)
-					println("dropped outgoing packet:", err.Error())
-				}
-			} else {
-				markSent(i)
-			}
-		}
-	}
+// Addr returns the current IP address of the stack.
+func (s *Stack) Addr() netip.Addr {
+	return s.s.Addr()
 }
